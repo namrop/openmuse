@@ -1,3 +1,4 @@
+import "./env.ts";
 import { randomUUID } from "node:crypto";
 import { MessageSchema } from "@ag-ui/core";
 import { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
@@ -12,7 +13,7 @@ import { createAuth } from "./auth.ts";
 import { BrowserService } from "./browser.ts";
 import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
-import { assertApiDeploymentConfig, type Config } from "./config.ts";
+import type { Config } from "./config.ts";
 import type { Store } from "./db.ts";
 import { agentRoutes } from "./engine/routes.ts";
 import { AgentService } from "./engine/service.ts";
@@ -26,7 +27,6 @@ export async function createApp(
   config: Config,
   options: { docker?: DockerRunner } = {},
 ) {
-  assertApiDeploymentConfig(config);
   const auth = await createAuth(db, config),
     files = new Files(db, config, auth),
     google = new GoogleAuth(db, config),
@@ -41,7 +41,9 @@ export async function createApp(
   const browser = new BrowserService(db, config, auth, files);
   const computer = new ComputerService(db, config, options.docker);
   const agent = new AgentService(db, config, workspace, files, actions, browser, computer);
-  const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
+  const intelligence = config.intelligenceApiKey
+    ? new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey })
+    : undefined;
   const runtime = makeRuntime(config, agent, auth, intelligence);
   const app = new Hono<{ Variables: { owner: string } }>();
   const origins = new Set([...config.allowedOrigins, new URL(config.publicUrl).origin]);
@@ -211,19 +213,21 @@ export async function createApp(
     });
     const main = await db.get<{ threadId: string }>(owner, "conversation-settings", "main");
     if (!main) throw new AppError("Main conversation could not be loaded", 503);
-    try {
-      await intelligence.getOrCreateThread({
-        threadId: main.threadId,
-        userId: owner,
-        agentId: "default",
-      });
-    } catch {
-      throw new AppError(
-        "Main conversation is unavailable. Check the Rich Threads connection and try again.",
-        502,
-      );
+    if (intelligence) {
+      try {
+        await intelligence.getOrCreateThread({
+          threadId: main.threadId,
+          userId: owner,
+          agentId: "default",
+        });
+      } catch {
+        throw new AppError(
+          "Main conversation is unavailable. Check the Rich Threads connection and try again.",
+          502,
+        );
+      }
     }
-    return c.json({ threadId: main.threadId, existing: true });
+    return c.json({ threadId: main.threadId, existing: Boolean(intelligence) });
   });
   app.get("/api/conversation", async (c) =>
     c.json((await db.get(c.get("owner"), "conversations", "default")) ?? { messages: [] }),

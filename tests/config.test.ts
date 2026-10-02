@@ -1,55 +1,77 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  assertApiDeploymentConfig,
   browserWorkerUrl,
-  type Config,
+  optionalIntelligenceKey,
   shadowedEnvKeys,
 } from "../apps/server/src/config.ts";
 
-const sampleConfig: Config = {
-  mode: "sample",
-  port: 8787,
-  host: "127.0.0.1",
-  publicUrl: "http://localhost:8787",
-  dataDir: ".openmuse",
-  agentBackend: "sample",
-  googleRedirectUri: "http://localhost:8787/api/google/callback",
-  allowedOrigins: ["http://localhost:8081"],
-};
+test("a missing or blank Intelligence key means local conversations", () => {
+  for (const key of [undefined, "", " \t\n"]) assert.equal(optionalIntelligenceKey(key), undefined);
+  assert.equal(
+    optionalIntelligenceKey("  test-project-key-never-sent\n"),
+    "test-project-key-never-sent",
+  );
+});
 
-function liveConfig(intelligenceApiKey?: string): Config {
-  return {
-    ...sampleConfig,
-    mode: "live",
-    agentBackend: "model",
-    intelligenceApiKey,
-  };
-}
-
-const missingKeyMessage =
-  "OpenMuse requires CPK_INTELLIGENCE_API_KEY. " +
-  "Run `npx copilotkit@latest login` and `npx copilotkit@latest project select`, " +
-  "then set the generated server-only key. " +
-  "See https://docs.copilotkit.ai/intelligence/connect-your-runtime";
-
-test("every API mode rejects a missing or blank Intelligence key", () => {
-  for (const mode of [sampleConfig, liveConfig()]) {
-    for (const key of [undefined, "", " \t\n"]) {
-      assert.throws(() => assertApiDeploymentConfig({ ...mode, intelligenceApiKey: key }), {
-        name: "Error",
-        message: missingKeyMessage,
-      });
+test("sample and live mode both start without an Intelligence key", async () => {
+  const { readConfig } = await import("../apps/server/src/config.ts");
+  const keys = [
+    "WORKSPACE_MODE",
+    "AGENT_BACKEND",
+    "CPK_INTELLIGENCE_API_KEY",
+    "OPENMUSE_ACCESS_KEY",
+    "TOKEN_ENCRYPTION_KEY",
+  ];
+  const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    delete process.env.CPK_INTELLIGENCE_API_KEY;
+    delete process.env.AGENT_BACKEND;
+    process.env.WORKSPACE_MODE = "sample";
+    assert.equal(readConfig().intelligenceApiKey, undefined);
+    process.env.WORKSPACE_MODE = "live";
+    process.env.OPENMUSE_ACCESS_KEY = "fixture-access-key-of-24-plus-chars";
+    process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    const live = readConfig();
+    assert.equal(live.mode, "live");
+    assert.equal(live.intelligenceApiKey, undefined);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 });
 
-test("every API mode accepts a non-empty Intelligence key", () => {
-  for (const mode of [sampleConfig, liveConfig()]) {
-    assert.doesNotThrow(() =>
-      assertApiDeploymentConfig({ ...mode, intelligenceApiKey: "test-project-key-never-sent" }),
-    );
-  }
+test("the CopilotKit telemetry opt-out is set before the runtime module loads", () => {
+  // A fresh process, as the server starts: the runtime reads the opt-out once, when its
+  // module is evaluated, so the server's own import order decides whether it is off.
+  const runtimeDir = dirname(
+    createRequire(import.meta.url).resolve("@copilotkit/runtime/package.json"),
+  );
+  const client = pathToFileURL(join(runtimeDir, "dist/v2/runtime/telemetry/telemetry-client.mjs"));
+  const app = pathToFileURL(fileURLToPath(new URL("../apps/server/src/app.ts", import.meta.url)));
+  const env = { ...process.env };
+  delete env.COPILOTKIT_TELEMETRY_DISABLED;
+  delete env.DO_NOT_TRACK;
+  const out = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      `await import(${JSON.stringify(app.href)});` +
+        `const t = (await import(${JSON.stringify(client.href)})).default;` +
+        "console.log(JSON.stringify({ disabled: t.telemetryDisabled }));",
+    ],
+    { env, encoding: "utf8" },
+  );
+  assert.deepEqual(JSON.parse(out.trim().split("\n").at(-1) ?? ""), { disabled: true });
 });
 
 test("Jev mode is off by default and validates explicit modes", async () => {

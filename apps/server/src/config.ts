@@ -1,30 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import "./env.ts";
 import { resolve } from "node:path";
-import { parseEnv } from "node:util";
 
-/** .env keys whose file value loses to a different value already set in the environment. */
-export function shadowedEnvKeys(
-  file: Record<string, string | undefined>,
-  env: Record<string, string | undefined> = process.env,
-): string[] {
-  return Object.keys(file).filter((key) => env[key] !== undefined && env[key] !== file[key]);
-}
-
-if (existsSync(".env")) {
-  // loadEnvFile never overrides existing variables. A stale shell or system-wide value
-  // (for example OPENAI_API_KEY) would otherwise silently replace the .env setting.
-  const shadowed = shadowedEnvKeys(parseEnv(readFileSync(".env", "utf8")));
-  process.loadEnvFile(".env");
-  if (shadowed.length)
-    console.warn(
-      `[OpenMuse] Using ${shadowed.join(", ")} from the environment instead of .env. ` +
-        (shadowed.length === 1
-          ? "Unset it to use the .env value."
-          : "Unset them to use the .env values."),
-    );
-}
-process.env.DO_NOT_TRACK ??= "1";
-process.env.COPILOTKIT_TELEMETRY_DISABLED ??= "true";
+export { shadowedEnvKeys } from "./env.ts";
 
 export interface Config {
   mode: "sample" | "live";
@@ -58,25 +35,18 @@ export interface Config {
 /** Pinned so live rankings do not shift when TypeSafe moves the `jev-latest` alias. */
 export const defaultJevModel = "jev-1.13.0";
 
-export const intelligenceKeyRequiredMessage =
-  "OpenMuse requires CPK_INTELLIGENCE_API_KEY. " +
-  "Run `npx copilotkit@latest login` and `npx copilotkit@latest project select`, " +
-  "then set the generated server-only key. " +
-  "See https://docs.copilotkit.ai/intelligence/connect-your-runtime";
-
 export function required(name: string, message: string, value = process.env[name]): string {
   if (!value?.trim()) throw new Error(message);
   return value.trim();
 }
 
-export function assertApiDeploymentConfig(
-  config: Config,
-): asserts config is Config & { intelligenceApiKey: string } {
-  required(
-    "CPK_INTELLIGENCE_API_KEY",
-    intelligenceKeyRequiredMessage,
-    config.intelligenceApiKey ?? "",
-  );
+/**
+ * CopilotKit Intelligence is optional. With a key, conversations are stored in the
+ * Intelligence project and the menu lists them (Rich Threads). Without one, the runtime
+ * keeps no hosted state and the conversation is saved in OpenMuse's own database.
+ */
+export function optionalIntelligenceKey(value = process.env.CPK_INTELLIGENCE_API_KEY) {
+  return value?.trim() || undefined;
 }
 
 /** Accept a full worker URL, or host:port from a platform that omits the scheme. */
@@ -127,7 +97,7 @@ export function readConfig(): Config {
     agentBackend: backend,
     agentUrl: process.env.AGENT_URL,
     agentToken: process.env.AGENT_TOKEN,
-    intelligenceApiKey: required("CPK_INTELLIGENCE_API_KEY", intelligenceKeyRequiredMessage),
+    intelligenceApiKey: optionalIntelligenceKey(),
     googleClientId: process.env.GOOGLE_CLIENT_ID,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
